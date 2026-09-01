@@ -1,5 +1,4 @@
-        fr
-        om typing import Dict, List
+from typing import Dict, List
 from openai import OpenAI
 
 # How many previous turns (user + assistant messages) to carry into the request.
