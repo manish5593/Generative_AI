@@ -1,5 +1,11 @@
 from typing import Dict, List
+
+import httpx
 from openai import OpenAI
+
+# The default 5s connect timeout is too tight for the Vocareum proxy, which can
+# take ~15s to establish a connection.
+REQUEST_TIMEOUT = httpx.Timeout(120.0, connect=60.0)
 
 # How many previous turns (user + assistant messages) to carry into the request.
 MAX_HISTORY_MESSAGES = 10
@@ -49,7 +55,7 @@ def generate_response(openai_key: str, user_message: str, context: str,
     messages.append({"role": "user", "content": user_message})
 
     # Create OpenAI Client
-    client = OpenAI(api_key=openai_key)
+    client = OpenAI(api_key=openai_key, timeout=REQUEST_TIMEOUT)
 
     # Send request to OpenAI
     response = client.chat.completions.create(
