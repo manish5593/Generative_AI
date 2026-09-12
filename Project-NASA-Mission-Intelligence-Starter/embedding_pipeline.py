@@ -27,6 +27,11 @@ import time
 from datetime import datetime
 import argparse
 from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
+from dotenv import load_dotenv
+
+# OPENAI_BASE_URL (the Vocareum proxy) must be in the environment before any
+# OpenAI client is built, or requests go to api.openai.com and the key is rejected.
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(
@@ -95,11 +100,58 @@ class ChromaEmbeddingPipelineTextOnly:
         Returns:
             List of (chunk_text, chunk_metadata) tuples
         """
-        # TODO: Handle short texts that don't need chunking
-        # TODO: Implement chunking logic with overlap
-        # TODO: Try to break at sentence boundaries
-        # TODO: Create metadata for each chunk
-        pass
+        text = text.strip()
+        if not text:
+            return []
+
+        # Advance by this much each time; the difference is what neighbouring
+        # chunks share, so a fact split across a boundary survives in one of them.
+        step = max(1, self.chunk_size - self.chunk_overlap)
+
+        # How far back from a hard cut we look for a sentence ending.
+        boundary_window = min(200, max(1, self.chunk_size // 4))
+
+        chunks: List[str] = []
+        start = 0
+
+        while start < len(text):
+            end = start + self.chunk_size
+
+            if end >= len(text):
+                end = len(text)
+            else:
+                # Prefer cutting at a sentence ending just before the hard limit.
+                search_from = max(start + 1, end - boundary_window)
+                boundary = max(
+                    text.rfind('. ', search_from, end),
+                    text.rfind('! ', search_from, end),
+                    text.rfind('? ', search_from, end),
+                    text.rfind('\n', search_from, end),
+                )
+                if boundary != -1:
+                    end = boundary + 1
+
+            chunk = text[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+
+            if end >= len(text):
+                break
+
+            # Never fail to advance, whatever chunk_size and chunk_overlap are.
+            next_start = end - self.chunk_overlap
+            start = next_start if next_start > start else start + step
+
+        # Built after the loop so every chunk can carry the final total.
+        result: List[Tuple[str, Dict[str, Any]]] = []
+        for index, chunk in enumerate(chunks):
+            chunk_metadata = metadata.copy()
+            chunk_metadata['chunk_index'] = index
+            chunk_metadata['total_chunks'] = len(chunks)
+            chunk_metadata['chunk_size'] = len(chunk)
+            result.append((chunk, chunk_metadata))
+
+        return result
     
     def check_document_exists(self, doc_id: str) -> bool:
         """
@@ -111,9 +163,13 @@ class ChromaEmbeddingPipelineTextOnly:
         Returns:
             True if document exists, False otherwise
         """
-        # TODO: Query collection for document ID
-        # TODO: Return True if exists, False otherwise
-        pass
+        try:
+            existing = self.collection.get(ids=[doc_id], include=[])
+            return len(existing['ids']) > 0
+
+        except Exception as e:
+            logger.error(f"Error checking document {doc_id}: {e}")
+            return False
     
     def update_document(self, doc_id: str, text: str, metadata: Dict[str, Any]) -> bool:
         """
@@ -216,10 +272,40 @@ class ChromaEmbeddingPipelineTextOnly:
         Returns:
             Embedding vector
         """
-        # TODO: Call OpenAI embeddings API
-        # TODO: Return embedding vector
-        # TODO: Add error handling
-        pass
+        try:
+            response = self.openai_client.embeddings.create(
+                model=self.embedding_model,
+                input=text,
+            )
+            return response.data[0].embedding
+
+        except Exception as e:
+            logger.error(f"Error getting embedding: {e}")
+            raise
+
+    def get_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """
+        Get OpenAI embeddings for several texts in a single API call.
+
+        Args:
+            texts: Texts to embed
+
+        Returns:
+            One embedding vector per input text, in the same order
+        """
+        if not texts:
+            return []
+
+        try:
+            response = self.openai_client.embeddings.create(
+                model=self.embedding_model,
+                input=texts,
+            )
+            return [item.embedding for item in response.data]
+
+        except Exception as e:
+            logger.error(f"Error getting embeddings batch of {len(texts)}: {e}")
+            raise
 
     def generate_document_id(self, file_path: Path, metadata: Dict[str, Any]) -> str:
         """
