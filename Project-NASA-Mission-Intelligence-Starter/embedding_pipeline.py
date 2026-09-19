@@ -566,12 +566,50 @@ class ChromaEmbeddingPipelineTextOnly:
             'missions': {}
         }
         
-        # TODO: Get files to process
-        # TODO: Loop through each file
-        # TODO: Process file and add to collection
-        # TODO: Update statistics
-        # TODO: Handle errors gracefully
-        
+        files = self.scan_text_files_only(base_path)
+
+        for file_path in files:
+            # Scoped to one file so a single bad file cannot abandon the rest.
+            try:
+                documents = self.process_text_file(file_path)
+                if not documents:
+                    logger.warning(f"No chunks produced for {file_path.name}")
+                    continue
+
+                result = self.add_documents_to_collection(
+                    documents,
+                    file_path,
+                    update_mode=update_mode,
+                )
+
+                stats['files_processed'] += 1
+                stats['total_chunks'] += len(documents)
+                stats['documents_added'] += result['added']
+                stats['documents_updated'] += result['updated']
+                stats['documents_skipped'] += result['skipped']
+
+                # main() prints a per-mission breakdown from this structure.
+                mission = self.extract_mission_from_path(file_path)
+                mission_stats = stats['missions'].setdefault(
+                    mission,
+                    {'files': 0, 'chunks': 0, 'added': 0, 'updated': 0, 'skipped': 0},
+                )
+                mission_stats['files'] += 1
+                mission_stats['chunks'] += len(documents)
+                mission_stats['added'] += result['added']
+                mission_stats['updated'] += result['updated']
+                mission_stats['skipped'] += result['skipped']
+
+                logger.info(
+                    f"{file_path.name}: {len(documents)} chunks -> "
+                    f"added {result['added']}, updated {result['updated']}, "
+                    f"skipped {result['skipped']}"
+                )
+
+            except Exception as e:
+                stats['errors'] += 1
+                logger.error(f"Error processing {file_path}: {e}")
+
         return stats
     
     def get_collection_info(self) -> Dict[str, Any]:
