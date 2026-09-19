@@ -312,10 +312,12 @@ class ChromaEmbeddingPipelineTextOnly:
         Generate stable document ID based on file path and chunk position
         This allows for document updates without changing IDs
         """
-        # TODO: Create consistent ID format
-        # TODO: Use mission, source, and chunk_index
-        # Format: mission_source_chunk_0001
-        pass
+        mission = metadata.get('mission', 'unknown')
+        source = metadata.get('source', file_path.stem)
+        chunk_index = metadata.get('chunk_index', 0)
+
+        # Zero-padded so ids sort in reading order: chunk_0002 before chunk_0010.
+        return f"{mission}_{source}_chunk_{chunk_index:04d}"
     
     def process_text_file(self, file_path: Path) -> List[Tuple[str, Dict[str, Any]]]:
         """
@@ -488,14 +490,55 @@ class ChromaEmbeddingPipelineTextOnly:
         
         stats = {'added': 0, 'updated': 0, 'skipped': 0}
         
-        # TODO: Handle different update modes (skip, update, replace)
-        # TODO: Process documents in batches
-        # TODO: For each document:
-        #   - Generate document ID
-        #   - Check if exists
-        #   - Get embedding
-        #   - Add or update in collection
-        # TODO: Return statistics
+        # 'replace' clears this file's chunks once, up front, so everything
+        # below behaves like a first-time import.
+        if update_mode == 'replace':
+            existing_ids = self.get_file_documents(file_path)
+            if existing_ids:
+                self.collection.delete(ids=existing_ids)
+                logger.info(f"Replace mode: deleted {len(existing_ids)} existing documents "
+                            f"for {file_path.name}")
+
+        for batch_start in range(0, len(documents), batch_size):
+            batch = documents[batch_start:batch_start + batch_size]
+
+            add_ids, add_texts, add_metadatas = [], [], []
+            to_update = []
+
+            for text, metadata in batch:
+                doc_id = self.generate_document_id(file_path, metadata)
+
+                # After a replace there is nothing left to collide with, so skip
+                # the lookup entirely.
+                if update_mode != 'replace' and self.check_document_exists(doc_id):
+                    if update_mode == 'update':
+                        to_update.append((doc_id, text, metadata))
+                    else:
+                        stats['skipped'] += 1
+                    continue
+
+                add_ids.append(doc_id)
+                add_texts.append(text)
+                add_metadatas.append(metadata)
+
+            # One embedding call for the whole batch, not one per chunk.
+            if add_texts:
+                try:
+                    embeddings = self.get_embeddings_batch(add_texts)
+                    self.collection.add(
+                        ids=add_ids,
+                        documents=add_texts,
+                        metadatas=add_metadatas,
+                        embeddings=embeddings,
+                    )
+                    stats['added'] += len(add_ids)
+                except Exception as e:
+                    logger.error(f"Error adding batch of {len(add_ids)} from "
+                                 f"{file_path.name}: {e}")
+
+            for doc_id, text, metadata in to_update:
+                if self.update_document(doc_id, text, metadata):
+                    stats['updated'] += 1
 
         return stats
     
