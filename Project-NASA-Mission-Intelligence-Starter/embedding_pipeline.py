@@ -13,16 +13,12 @@ Supported data sources:
 - Challenger transcribed audio data (text files only)
 """
 
-import os
-import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Tuple
 import chromadb
 from chromadb.config import Settings
-import openai
 from openai import OpenAI
-import hashlib
 import time
 from datetime import datetime
 import argparse
@@ -216,8 +212,8 @@ class ChromaEmbeddingPipelineTextOnly:
             
             # Find documents matching the source pattern
             ids_to_delete = []
-            for i, metadata in enumerate(all_docs['metadatas']):
-                if source_pattern in metadata.get('source', ''):
+            for i, metadata in enumerate(all_docs['metadatas'] or []):
+                if source_pattern in str(metadata.get('source') or ''):
                     ids_to_delete.append(all_docs['ids'][i])
             
             if ids_to_delete:
@@ -251,7 +247,7 @@ class ChromaEmbeddingPipelineTextOnly:
             
             # Find documents from this file
             file_doc_ids = []
-            for i, metadata in enumerate(all_docs['metadatas']):
+            for i, metadata in enumerate(all_docs['metadatas'] or []):
                 if (metadata.get('source') == source and 
                     metadata.get('mission') == mission):
                     file_doc_ids.append(all_docs['ids'][i])
@@ -542,7 +538,7 @@ class ChromaEmbeddingPipelineTextOnly:
 
         return stats
     
-    def process_all_text_data(self, base_path: str, update_mode: str = 'skip') -> Dict[str, int]:
+    def process_all_text_data(self, base_path: str, update_mode: str = 'skip') -> Dict[str, Any]:
         """
         Process all text files and add to ChromaDB
         
@@ -556,7 +552,7 @@ class ChromaEmbeddingPipelineTextOnly:
         Returns:
             Statistics about processed files
         """
-        stats = {
+        stats: Dict[str, Any] = {
             'files_processed': 0,
             'documents_added': 0,
             'documents_updated': 0,
@@ -614,8 +610,17 @@ class ChromaEmbeddingPipelineTextOnly:
     
     def get_collection_info(self) -> Dict[str, Any]:
         """Get information about the ChromaDB collection"""
-        # TODO: Return collection name, document count, metadata
-        pass
+        try:
+            return {
+                'collection_name': self.collection.name,
+                'document_count': self.collection.count(),
+                'embedding_model': self.embedding_model,
+                'persist_directory': self.chroma_persist_directory,
+            }
+        except Exception as e:
+            logger.error(f"Error getting collection info: {e}")
+            # An empty dict still answers .get(); returning None would crash main().
+            return {}
     
     def query_collection(self, query_text: str, n_results: int = 5) -> Dict[str, Any]:
         """
@@ -628,8 +633,17 @@ class ChromaEmbeddingPipelineTextOnly:
         Returns:
             Query results
         """
-        # TODO: Perform test query and return results
-        pass
+        if not query_text:
+            return {}
+
+        try:
+            return self.collection.query(
+                query_texts=[query_text],
+                n_results=n_results,
+            )
+        except Exception as e:
+            logger.error(f"Error querying collection: {e}")
+            return {}
     
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get detailed statistics about the collection"""
@@ -637,11 +651,12 @@ class ChromaEmbeddingPipelineTextOnly:
             # Get all documents to analyze
             all_docs = self.collection.get()
             
-            if not all_docs['metadatas']:
+            metadatas = all_docs['metadatas']
+            if not metadatas:
                 return {'error': 'No documents in collection'}
             
-            stats = {
-                'total_documents': len(all_docs['metadatas']),
+            stats: Dict[str, Any] = {
+                'total_documents': len(metadatas),
                 'missions': {},
                 'data_types': {},
                 'document_categories': {},
@@ -649,7 +664,7 @@ class ChromaEmbeddingPipelineTextOnly:
             }
             
             # Analyze metadata
-            for metadata in all_docs['metadatas']:
+            for metadata in metadatas:
                 mission = metadata.get('mission', 'unknown')
                 data_type = metadata.get('data_type', 'unknown')
                 doc_category = metadata.get('document_category', 'unknown')
