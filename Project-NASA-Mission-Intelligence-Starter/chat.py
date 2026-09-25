@@ -8,6 +8,7 @@ and feedback collection for continuous improvement.
 
 import streamlit as st
 import os
+import re
 import json
 import pandas as pd
 
@@ -32,6 +33,43 @@ st.set_page_config(
     page_icon="🚀",
     layout="wide"
 )
+
+# generate_response() returns failures as text starting with this, instead of raising.
+GENERATION_ERROR_PREFIX = "Error generating response"
+
+# Mission filter choices: sidebar label -> "mission" metadata value stored by the pipeline.
+AUTO_DETECT = "Auto-detect from question"
+MISSION_FILTERS = {
+    AUTO_DETECT: None,
+    "All missions": None,
+    "Apollo 11": "apollo_11",
+    "Apollo 13": "apollo_13",
+    "Challenger": "challenger",
+}
+
+MISSION_PATTERNS = {
+    "apollo_11": re.compile(r"\bapollo[\s_-]*(11|xi)\b", re.IGNORECASE),
+    "apollo_13": re.compile(r"\bapollo[\s_-]*(13|xiii)\b", re.IGNORECASE),
+    "challenger": re.compile(r"\bchallenger\b|\bsts[\s-]*51[\s-]*l\b|\b51[\s-]*l\b", re.IGNORECASE),
+}
+
+
+def detect_mission(question: str, history: List[Dict]) -> Optional[str]:
+    """Return the one mission a question is about, or None if it names none or several.
+
+    Follow-ups like "how did they get home?" name no mission, so the most recent
+    earlier user message that names exactly one is used instead.
+    """
+    earlier = [m["content"] for m in reversed(history) if m.get("role") == "user"]
+    for text in [question] + earlier:
+        found = [mission for mission, pattern in MISSION_PATTERNS.items() if pattern.search(text)]
+        if len(found) == 1:
+            return found[0]
+        if found:
+            # Several missions named: a comparison, so search across all of them.
+            return None
+    return None
+
 
 def discover_chroma_backends() -> Dict[str, Dict[str, str]]:
     """Discover available ChromaDB backends in the project directory"""
@@ -67,7 +105,7 @@ def generate_response(openai_key, user_message: str, context: str,
     try:
         return llm_client.generate_response(openai_key, user_message, context, conversation_history, model)
     except Exception as e:
-        return f"Error generating response: {e}"
+        return f"{GENERATION_ERROR_PREFIX}: {e}"
 
 def evaluate_response_quality(question: str, answer: str, contexts: List[str]) -> Dict[str, float]:
     """Evaluate response quality using RAGAS metrics"""
@@ -157,6 +195,9 @@ def main():
             st.stop()
         else:
             os.environ["CHROMA_OPENAI_API_KEY"] = openai_key
+            # ragas_evaluator's LangChain clients read this one, so evaluation uses
+            # the same key as the rest of the app rather than whatever .env holds.
+            os.environ["OPENAI_API_KEY"] = openai_key
         
         # Model selection
         model_choice = st.selectbox(
@@ -168,6 +209,12 @@ def main():
         # Retrieval settings
         st.subheader("🔍 Retrieval Settings")
         n_docs = st.slider("Documents to retrieve", 1, 10, 3)
+        mission_choice = st.selectbox(
+            "Mission filter",
+            options=list(MISSION_FILTERS.keys()),
+            help="Only search documents from one mission. Auto-detect uses the mission "
+                 "named in the question, so Apollo 13 questions don't pull in Apollo 11 reports."
+        )
         
         # Evaluation settings
         st.subheader("📊 Evaluation Settings")
@@ -211,10 +258,16 @@ def main():
         with st.chat_message("assistant"):
             with st.spinner("Searching documents and generating response..."):
                 # Retrieve relevant documents
+                if mission_choice == AUTO_DETECT:
+                    mission_filter = detect_mission(prompt, st.session_state.messages[:-1])
+                else:
+                    mission_filter = MISSION_FILTERS[mission_choice]
+
                 docs_result = retrieve_documents(
-                    collection, 
-                    prompt, 
-                    n_docs
+                    collection,
+                    prompt,
+                    n_docs,
+                    mission_filter
                 )
                 
                 # Format context
@@ -235,8 +288,11 @@ def main():
                 )
                 st.markdown(response)
                 
-                # Evaluate response quality if enabled
-                if enable_evaluation and RAGAS_AVAILABLE:
+                # Evaluate response quality if enabled. A failed generation is an
+                # error message, not an answer, so there is nothing to score.
+                if response.startswith(GENERATION_ERROR_PREFIX):
+                    st.session_state.last_evaluation = {"error": "Not evaluated: no answer was generated"}
+                elif enable_evaluation and RAGAS_AVAILABLE:
                     with st.spinner("Evaluating response quality..."):
                         evaluation_scores = evaluate_response_quality(
                             prompt, 
